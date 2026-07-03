@@ -26,16 +26,11 @@ npm run preview
 - `api/generate-summary.js` — Vercel serverless function that proxies AI summary requests to Anthropic (keeps the API key server-side)
 - `ios/` — Capacitor-generated native iOS project
 
-## AI summary backend (deploy once)
+## AI summary backend
 
-The AI summary feature calls `/api/generate-summary` instead of the Anthropic API directly, so the API key never ships in the app.
+The AI summary feature calls `/api/generate-summary` instead of the Anthropic API directly, so the API key never ships in the app. This is deployed at https://cto-dog-training.vercel.app (Git-connected to this repo — pushes to `main` auto-deploy). The `ANTHROPIC_API_KEY` environment variable is set in the Vercel project's Settings → Environment Variables.
 
-1. `vercel` (or connect this repo in the Vercel dashboard)
-2. In the Vercel project settings, add an environment variable `ANTHROPIC_API_KEY` with your key
-3. Deploy, then build the app with that URL baked in:
-   ```bash
-   VITE_API_BASE_URL=https://your-project.vercel.app npm run build
-   ```
+`src/config.js` defaults `API_BASE_URL` to that deployment. Override it at build time with `VITE_API_BASE_URL` if the proxy ever moves.
 
 ## iOS / TestFlight
 
