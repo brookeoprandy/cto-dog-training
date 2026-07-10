@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { API_BASE_URL } from "./config.js";
+import { Capacitor } from "@capacitor/core";
+import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Share } from "@capacitor/share";
 
 const USERS_KEY   = "cto-dt-users-v1";
 const SESSION_KEY = "cto-dt-session-v1";
@@ -24,7 +27,39 @@ function formatDateTime(iso) {
 }
 function getInitials(name) { return name ? name.slice(0,2).toUpperCase() : "??"; }
 
+async function downloadFile(f) {
+  if (!Capacitor.isNativePlatform()) {
+    const a = document.createElement("a");
+    a.href = f.dataUrl;
+    a.download = f.name || "file";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  try {
+    const base64 = f.dataUrl.slice(f.dataUrl.indexOf(",") + 1);
+    const written = await Filesystem.writeFile({
+      path: f.name || `file-${uid()}`,
+      data: base64,
+      directory: Directory.Cache,
+    });
+    await Share.share({ url: written.uri, dialogTitle: `Save ${f.name || "file"}` });
+  } catch (e) {
+    if (e?.message !== "Share canceled") alert("Couldn't save this file. Please try again.");
+  }
+}
+
 const DOG_COLORS = ["#D97706","#7C3AED","#0891B2","#16A34A","#C0392B","#EA580C","#9333EA","#0284C7"];
+
+const BEHAVIOR_FLAG_PHRASES = ["guarding","reactivity","reaction","aggression","separation anxiety","kennel aggression","lunging","possession","not responding","mouthing","growling","unresponsive"];
+function detectFlaggedBehaviors(noteText, existingBehaviors) {
+  const lower = noteText.toLowerCase();
+  const existingLabels = new Set((existingBehaviors||[]).filter(b=>!b.resolved).map(b=>b.label.toLowerCase()));
+  return BEHAVIOR_FLAG_PHRASES
+    .filter(phrase => lower.includes(phrase) && !existingLabels.has(phrase))
+    .map(phrase => ({ id:uid(), label: phrase.charAt(0).toUpperCase()+phrase.slice(1), severity:"high", resolved:false }));
+}
 
 const MOTIVATION_EMOJI = { "Very low":"😥", "Low":"🙁", "Moderate":"😐", "High":"😃", "Very high":"🔥" };
 
@@ -90,7 +125,11 @@ function saveDogs(d)    { try { localStorage.setItem(DOGS_KEY, JSON.stringify(d)
 
 // ── Admin config ──────────────────────────────────────────────────────────────
 const ADMIN_USERNAMES = ["brookeoprandy"];
-function isAdmin(username) { return ADMIN_USERNAMES.includes((username||"").toLowerCase()); }
+function isAdmin(username) {
+  const key = (username||"").toLowerCase();
+  if (ADMIN_USERNAMES.includes(key)) return true;
+  return !!loadUsers()[key]?.admin;
+}
 
 
 const RED  = "#8B0000";
@@ -156,14 +195,15 @@ function AuthScreen({ onLogin }) {
     if (password !== confirm) return setError("Passwords don't match.");
     const users = loadUsers();
     if (users[key])          return setError("That username is already taken.");
-    const newUser = { id:uid(), username:key, displayName:displayName.trim(), password, avatar:avatar||null, phone:phone.trim() };
+    const isFirstAccount = Object.keys(users).length === 0;
+    const newUser = { id:uid(), username:key, displayName:displayName.trim(), password, avatar:avatar||null, phone:phone.trim(), admin:isFirstAccount };
     users[key] = newUser; saveUsers(users);
     const sess = { userId:newUser.id, username:newUser.username, displayName:newUser.displayName, avatar:newUser.avatar, phone:newUser.phone, admin:isAdmin(newUser.username) };
     saveSession(sess); onLogin(sess);
   }
   return (
-    <div style={{minHeight:"100vh",background:"#FAF8F5",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,-apple-system,sans-serif"}}>
-      <div style={{background:"#fff",borderRadius:16,border:"1px solid #e8e0d8",padding:"2rem",width:340,boxShadow:"0 2px 24px rgba(139,0,0,0.08)"}}>
+    <div style={{height:"100vh",overflowY:"auto",overflowX:"hidden",background:"#FAF8F5",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,-apple-system,sans-serif"}}>
+      <div className="modal-card" style={{background:"#fff",borderRadius:16,border:"1px solid #e8e0d8",padding:"2rem",width:340,boxShadow:"0 2px 24px rgba(139,0,0,0.08)"}}>
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center",marginBottom:"1.75rem"}}>
           <img src={CTO_LOGO} alt="CTO Dog Training" style={{display:"block",width:120,height:120,objectFit:"contain",borderRadius:12,marginBottom:6,marginLeft:"auto",marginRight:"auto"}} />
           <div style={{fontSize:12,color:"#aaa",marginTop:4,letterSpacing:"0.5px",textTransform:"uppercase"}}>Trainer Dashboard</div>
@@ -208,6 +248,8 @@ function AddDogModal({ onSave, onClose }) {
   const [returnDate,setReturnDate] = useState("");
   const [goal,setGoal]           = useState("");
   const [concerns,setConcerns]   = useState("");
+  const [ownerName,setOwnerName]   = useState("");
+  const [ownerPhone,setOwnerPhone] = useState("");
   const [color,setColor]         = useState(DOG_COLORS[0]);
   function save() {
     if (!name.trim()) return;
@@ -215,11 +257,11 @@ function AddDogModal({ onSave, onClose }) {
       ? concerns.trim().split(/[\n,]+/).map(s=>s.trim()).filter(Boolean).map(label=>({id:uid(),label,severity:"high"}))
       : [];
     const checklist = (program === "training" || program === "lessons") ? makeDefaultChecklist() : [];
-    onSave({ id:uid(), name:name.trim(), breed:breed.trim()||"Unknown", age:age.trim(), entryDate:entryDate||today(), returnDate:program==="board"?returnDate:"", goal:goal.trim()||"General training", concerns:concerns.trim(), program, color, sessions:[], checklist, behaviors:concernBehaviors, files:[] });
+    onSave({ id:uid(), name:name.trim(), breed:breed.trim()||"Unknown", age:age.trim(), entryDate:entryDate||today(), returnDate:program==="board"?returnDate:"", goal:goal.trim()||"General training", concerns:concerns.trim(), ownerName:ownerName.trim(), ownerPhone:ownerPhone.trim(), program, color, sessions:[], checklist, behaviors:concernBehaviors, files:[] });
   }
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:360,boxShadow:"0 4px 32px rgba(0,0,0,0.18)",maxHeight:"90vh",overflowY:"auto"}}>
+      <div className="modal-card" style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:360,boxShadow:"0 4px 32px rgba(0,0,0,0.18)",maxHeight:"90vh",overflowY:"auto",overflowX:"hidden"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem"}}>
           <span style={{fontSize:16,fontWeight:600,color:"#1a1a1a"}}>Add new dog</span>
           <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#888",lineHeight:1}}>×</button>
@@ -244,6 +286,13 @@ function AddDogModal({ onSave, onClose }) {
             {program==="board"&&<div style={{flex:1}}><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Return date</label><input type="date" style={inp} value={returnDate} onChange={e=>setReturnDate(e.target.value)}/></div>}
           </div>
           {program==="training"&&<div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Training goal</label><input style={inp} value={goal} onChange={e=>setGoal(e.target.value)} placeholder="e.g. Obedience basics"/></div>}
+          <div>
+            <label style={{fontSize:12,color:"#666",display:"block",marginBottom:6}}>Owner's Name/Phone Number</label>
+            <div style={{display:"flex",gap:8}}>
+              <input style={inp} value={ownerName} onChange={e=>setOwnerName(e.target.value)} placeholder="Owner's name"/>
+              <input style={inp} value={ownerPhone} onChange={e=>setOwnerPhone(e.target.value)} placeholder="Phone number"/>
+            </div>
+          </div>
           <div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Owner problems and concerns</label><textarea style={{...inp,resize:"vertical",lineHeight:1.6}} rows={3} value={concerns} onChange={e=>setConcerns(e.target.value)} placeholder="e.g. Pulls on leash, jumps on guests..."/></div>
           <div>
             <label style={{fontSize:12,color:"#666",display:"block",marginBottom:6}}>Color tag</label>
@@ -270,17 +319,19 @@ function EditDogModal({ dog, onSave, onClose }) {
   const [returnDate,setReturnDate] = useState(dog.returnDate||"");
   const [goal,setGoal]             = useState(dog.goal);
   const [concerns,setConcerns]     = useState(dog.concerns||"");
+  const [ownerName,setOwnerName]   = useState(dog.ownerName||"");
+  const [ownerPhone,setOwnerPhone] = useState(dog.ownerPhone||"");
   const [color,setColor]           = useState(dog.color);
   const isBoard = dog.program === "board";
 
   function save() {
     if (!name.trim()) return;
-    onSave({ ...dog, name:name.trim(), breed:breed.trim()||"Unknown", age:age.trim(), entryDate:entryDate||today(), returnDate:isBoard?returnDate:"", goal:goal.trim()||"General training", concerns:concerns.trim(), color });
+    onSave({ ...dog, name:name.trim(), breed:breed.trim()||"Unknown", age:age.trim(), entryDate:entryDate||today(), returnDate:isBoard?returnDate:"", goal:goal.trim()||"General training", concerns:concerns.trim(), ownerName:ownerName.trim(), ownerPhone:ownerPhone.trim(), color });
   }
 
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:360,boxShadow:"0 4px 32px rgba(0,0,0,0.18)",maxHeight:"90vh",overflowY:"auto"}}>
+      <div className="modal-card" style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:360,boxShadow:"0 4px 32px rgba(0,0,0,0.18)",maxHeight:"90vh",overflowY:"auto",overflowX:"hidden"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem"}}>
           <span style={{fontSize:16,fontWeight:600,color:"#1a1a1a"}}>Edit {dog.name}</span>
           <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#888",lineHeight:1}}>×</button>
@@ -294,6 +345,13 @@ function EditDogModal({ dog, onSave, onClose }) {
             {isBoard&&<div style={{flex:1}}><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Return date</label><input type="date" style={inp} value={returnDate} onChange={e=>setReturnDate(e.target.value)}/></div>}
           </div>
           {!isBoard&&<div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Training goal</label><input style={inp} value={goal} onChange={e=>setGoal(e.target.value)}/></div>}
+          <div>
+            <label style={{fontSize:12,color:"#666",display:"block",marginBottom:6}}>Owner's Name/Phone Number</label>
+            <div style={{display:"flex",gap:8}}>
+              <input style={inp} value={ownerName} onChange={e=>setOwnerName(e.target.value)} placeholder="Owner's name"/>
+              <input style={inp} value={ownerPhone} onChange={e=>setOwnerPhone(e.target.value)} placeholder="Phone number"/>
+            </div>
+          </div>
           <div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Owner problems and concerns</label><textarea style={{...inp,resize:"vertical",lineHeight:1.6}} rows={3} value={concerns} onChange={e=>setConcerns(e.target.value)} placeholder="e.g. Pulls on leash, jumps on guests..."/></div>
           <div>
             <label style={{fontSize:12,color:"#666",display:"block",marginBottom:6}}>Color tag</label>
@@ -325,7 +383,7 @@ function AccountModal({ currentUser, onClose, onUpdateName, onLogout }) {
   function save() { if(!newName.trim())return; onUpdateName(newName.trim(),avatar,phone.trim()); setSaved(true); setTimeout(()=>setSaved(false),1800); }
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:340,boxShadow:"0 4px 32px rgba(0,0,0,0.18)"}}>
+      <div className="modal-card" style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:340,boxShadow:"0 4px 32px rgba(0,0,0,0.18)"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem"}}>
           <span style={{fontSize:16,fontWeight:600,color:"#1a1a1a"}}>My account</span>
           <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#888",lineHeight:1}}>×</button>
@@ -491,11 +549,12 @@ function Confetti({ visible }) {
 }
 
 // ── Summary Tab ───────────────────────────────────────────────────────────────
-function SummaryTab({ dog }) {
-  const [summary, setSummary]   = useState("");
+function SummaryTab({ dog, updateDog }) {
+  const [summary, setSummary]   = useState(dog.aiSummary || "");
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState("");
-  const [generated, setGenerated] = useState(false);
+  const [generated, setGenerated] = useState(!!dog.aiSummary);
+  const [generatedAt, setGeneratedAt] = useState(dog.aiSummaryGeneratedAt || null);
 
   async function generateSummary() {
     if (!dog.sessions.length) return;
@@ -528,8 +587,11 @@ Keep it concise, practical, and trainer-focused. Do not use markdown headers —
       const data = await res.json();
       const text = data.content?.map(c => c.text || "").join("") || "";
       if (!text) throw new Error("Empty response");
+      const now = new Date().toISOString();
       setSummary(text);
       setGenerated(true);
+      setGeneratedAt(now);
+      updateDog(dog.id, d => ({...d, aiSummary: text, aiSummaryGeneratedAt: now}));
     } catch(e) {
       setError("Failed to generate summary. Please try again.");
     } finally {
@@ -582,7 +644,7 @@ Keep it concise, practical, and trainer-focused. Do not use markdown headers —
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,paddingBottom:12,borderBottom:"1px solid #f0ebe4"}}>
             <div>
               <div style={{fontSize:14,fontWeight:700,color:"#1a1a1a"}}>{dog.name} — Progress Summary</div>
-              <div style={{fontSize:11,color:"#bbb",marginTop:2}}>Generated {new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit",hour12:true})}</div>
+              <div style={{fontSize:11,color:"#bbb",marginTop:2}}>Generated {new Date(generatedAt||Date.now()).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit",hour12:true})}</div>
             </div>
             <span style={{fontSize:11,fontWeight:500,padding:"3px 10px",borderRadius:99,background:"#F0FDF4",color:"#16A34A",border:"1px solid #BBF7D0"}}>AI Generated</span>
           </div>
@@ -601,17 +663,19 @@ function AddLessonDogModal({ onSave, onClose }) {
   const [entryDate,setEntryDate] = useState(today());
   const [goal,setGoal]           = useState("");
   const [concerns,setConcerns]   = useState("");
+  const [ownerName,setOwnerName]   = useState("");
+  const [ownerPhone,setOwnerPhone] = useState("");
   const [color,setColor]         = useState(DOG_COLORS[2]);
   function save() {
     if (!name.trim()) return;
     const concernBehaviors = concerns.trim()
       ? concerns.trim().split(/[\n,]+/).map(s=>s.trim()).filter(Boolean).map(label=>({id:uid(),label,severity:"high"}))
       : [];
-    onSave({ id:uid(), name:name.trim(), breed:breed.trim()||"Unknown", age:age.trim(), entryDate:entryDate||today(), returnDate:"", goal:goal.trim()||"General training", concerns:concerns.trim(), program:"lessons", color, sessions:[], checklist:makeDefaultChecklist(), behaviors:concernBehaviors, files:[] });
+    onSave({ id:uid(), name:name.trim(), breed:breed.trim()||"Unknown", age:age.trim(), entryDate:entryDate||today(), returnDate:"", goal:goal.trim()||"General training", concerns:concerns.trim(), ownerName:ownerName.trim(), ownerPhone:ownerPhone.trim(), program:"lessons", color, sessions:[], checklist:makeDefaultChecklist(), behaviors:concernBehaviors, files:[] });
   }
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:360,boxShadow:"0 4px 32px rgba(0,0,0,0.18)",maxHeight:"90vh",overflowY:"auto"}}>
+      <div className="modal-card" style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:360,boxShadow:"0 4px 32px rgba(0,0,0,0.18)",maxHeight:"90vh",overflowY:"auto",overflowX:"hidden"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem"}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <span style={{fontSize:16}}>📚</span>
@@ -625,6 +689,13 @@ function AddLessonDogModal({ onSave, onClose }) {
           <div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Age</label><input style={inp} value={age} onChange={e=>setAge(e.target.value)} placeholder="e.g. 2 years, 8 months"/></div>
           <div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Entry date</label><input type="date" style={inp} value={entryDate} onChange={e=>setEntryDate(e.target.value)}/></div>
           <div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Training goal</label><input style={inp} value={goal} onChange={e=>setGoal(e.target.value)} placeholder="e.g. Basic obedience"/></div>
+          <div>
+            <label style={{fontSize:12,color:"#666",display:"block",marginBottom:6}}>Owner's Name/Phone Number</label>
+            <div style={{display:"flex",gap:8}}>
+              <input style={inp} value={ownerName} onChange={e=>setOwnerName(e.target.value)} placeholder="Owner's name"/>
+              <input style={inp} value={ownerPhone} onChange={e=>setOwnerPhone(e.target.value)} placeholder="Phone number"/>
+            </div>
+          </div>
           <div><label style={{fontSize:12,color:"#666",display:"block",marginBottom:4}}>Owner problems and concerns</label><textarea style={{...inp,resize:"vertical",lineHeight:1.6}} rows={3} value={concerns} onChange={e=>setConcerns(e.target.value)} placeholder="e.g. Pulls on leash, jumps on guests..."/></div>
           <div>
             <label style={{fontSize:12,color:"#666",display:"block",marginBottom:6}}>Color tag</label>
@@ -668,11 +739,17 @@ function LessonDogDetail({ dog, currentUser, updateDog, setConfirm, setShowConfe
   function saveSession_(){
     if(!sessionNote.trim()) return;
     if(editingSessionId){
-      updateDog(dog.id,d=>({...d,sessions:d.sessions.map(s=>s.id===editingSessionId?{...s,date:sessionDate,note:sessionNote.trim(),motivation:sessionMotivation}:s)}));
+      updateDog(dog.id,d=>{
+        const flagged = detectFlaggedBehaviors(sessionNote.trim(), d.behaviors);
+        return {...d, sessions:d.sessions.map(s=>s.id===editingSessionId?{...s,date:sessionDate,note:sessionNote.trim(),motivation:sessionMotivation}:s), behaviors:[...d.behaviors,...flagged]};
+      });
       setEditingSessionId(null);
     } else {
       const entry={id:uid(),date:sessionDate,note:sessionNote.trim(),motivation:sessionMotivation,trainer:currentUser.displayName,loggedAt:new Date().toISOString()};
-      updateDog(dog.id,d=>({...d,sessions:[entry,...d.sessions]}));
+      updateDog(dog.id,d=>{
+        const flagged = detectFlaggedBehaviors(entry.note, d.behaviors);
+        return {...d, sessions:[entry,...d.sessions], behaviors:[...d.behaviors,...flagged]};
+      });
       setShowConfetti(true);setTimeout(()=>setShowConfetti(false),2800);
     }
     setSessionNote("");setSessionDate(today());setSessionMotivation("");
@@ -699,9 +776,9 @@ function LessonDogDetail({ dog, currentUser, updateDog, setConfirm, setShowConfe
   return (
     <>
       {/* Tabs */}
-      <div style={{display:"flex",gap:2,marginBottom:18,borderBottom:"1px solid #e8e0d8"}}>
+      <div style={{display:"flex",gap:2,marginBottom:18,borderBottom:"1px solid #e8e0d8",overflowX:"auto",overflowY:"hidden",touchAction:"pan-x",WebkitOverflowScrolling:"touch"}}>
         {tabs.map(t=>(
-          <button key={t} onClick={()=>switchTab(t)} style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:activeTab===t?600:400,color:activeTab===t?"#7E22CE":"#888",padding:"7px 14px 10px",borderBottom:activeTab===t?"2px solid #7E22CE":"2px solid transparent",marginBottom:-1,transition:"all 0.1s"}}>
+          <button key={t} onClick={()=>switchTab(t)} style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:activeTab===t?600:400,color:activeTab===t?"#7E22CE":"#888",padding:"7px 14px 10px",borderBottom:activeTab===t?"2px solid #7E22CE":"2px solid transparent",marginBottom:-1,transition:"all 0.1s",whiteSpace:"nowrap",flexShrink:0}}>
             {tabLabels[t]}
           </button>
         ))}
@@ -827,7 +904,7 @@ function LessonDogDetail({ dog, currentUser, updateDog, setConfirm, setShowConfe
         )}
 
         {/* Summary */}
-        {activeTab==="summary"&&<SummaryTab dog={dog}/>}
+        {activeTab==="summary"&&<SummaryTab dog={dog} updateDog={updateDog}/>}
       </div>
     </>
   );
@@ -851,7 +928,7 @@ function RestoreModal({ dog, program, onRestore, onClose }) {
 
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:400,boxShadow:"0 4px 32px rgba(0,0,0,0.2)",maxHeight:"90vh",overflowY:"auto"}}>
+      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:400,boxShadow:"0 4px 32px rgba(0,0,0,0.2)",maxHeight:"90vh",overflowY:"auto",overflowX:"hidden"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.25rem"}}>
           <div>
             <div style={{fontSize:16,fontWeight:600,color:"#1a1a1a"}}>Restore {dog.name}</div>
@@ -910,7 +987,7 @@ function AlumniView({ alumni, restoreDog }) {
 
   const filtered = alumni.filter(d => {
     const q = search.toLowerCase();
-    return !q || d.name.toLowerCase().includes(q) || (d.breed||"").toLowerCase().includes(q) || (d.goal||"").toLowerCase().includes(q) || (d.program||"").toLowerCase().includes(q);
+    return !q || d.name.toLowerCase().includes(q) || (d.breed||"").toLowerCase().includes(q) || (d.goal||"").toLowerCase().includes(q) || (d.program||"").toLowerCase().includes(q) || (d.ownerName||"").toLowerCase().includes(q) || (d.ownerPhone||"").toLowerCase().includes(q);
   });
 
   function programBadge(p) {
@@ -920,13 +997,13 @@ function AlumniView({ alumni, restoreDog }) {
   }
 
   return (
-    <div style={{flex:1,overflowY:"auto",padding:"28px 32px",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
+    <div className="view-pad" style={{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
       <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:20,gap:16,flexWrap:"wrap"}}>
         <div>
           <h1 style={{fontSize:22,fontWeight:700,color:"#1a1a1a",margin:0}}>Alumni</h1>
           <p style={{fontSize:13,color:"#888",marginTop:4}}>{alumni.length} archived dog{alumni.length!==1?"s":""} — all logs preserved</p>
         </div>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by name, breed, goal, program…" style={{...inp,width:280,background:"#fff"}}/>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by name, breed, goal, program, owner, phone…" style={{...inp,width:280,background:"#fff"}}/>
       </div>
 
       {alumni.length===0?(
@@ -983,7 +1060,7 @@ function AlumniView({ alumni, restoreDog }) {
                     {sortedSessions.length>0&&(
                       <div style={{marginBottom:16}}>
                         <div style={{fontSize:12,fontWeight:600,color:"#888",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:8}}>Session Logs ({sortedSessions.length})</div>
-                        <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:260,overflowY:"auto"}}>
+                        <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:260,overflowY:"auto",overflowX:"hidden"}}>
                           {sortedSessions.map(s=>(
                             <div key={s.id} style={{background:"#FAF8F5",borderRadius:8,padding:"10px 12px",border:"1px solid #e8e0d8"}}>
                               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:5}}>
@@ -1044,7 +1121,7 @@ function PendingReviewModal({ dog, onApprove, onReject, onClose }) {
 
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:400,boxShadow:"0 4px 32px rgba(0,0,0,0.2)",maxHeight:"90vh",overflowY:"auto"}}>
+      <div style={{background:"#fff",borderRadius:14,padding:"1.5rem",width:400,boxShadow:"0 4px 32px rgba(0,0,0,0.2)",maxHeight:"90vh",overflowY:"auto",overflowX:"hidden"}}>
         {/* Header */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.25rem"}}>
           <div>
@@ -1086,6 +1163,68 @@ function PendingReviewModal({ dog, onApprove, onReject, onClose }) {
   );
 }
 
+// ── Pull to refresh ────────────────────────────────────────────────────────────
+function findScrollParent(el) {
+  while (el && el !== document.body) {
+    const style = getComputedStyle(el);
+    if (style.overflowY === "auto" || style.overflowY === "scroll") return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+function PullToRefresh({ onRefresh, children }) {
+  const [pullY, setPullY] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const startYRef = useRef(null);
+  const draggingRef = useRef(false);
+  const THRESHOLD = 64;
+
+  function onTouchStart(e) {
+    if (refreshing) return;
+    const scrollParent = findScrollParent(e.target);
+    if (!scrollParent || scrollParent.scrollTop <= 0) {
+      startYRef.current = e.touches[0].clientY;
+      draggingRef.current = true;
+    } else {
+      startYRef.current = null;
+      draggingRef.current = false;
+    }
+  }
+  function onTouchMove(e) {
+    if (!draggingRef.current || startYRef.current==null || refreshing) return;
+    const dy = e.touches[0].clientY - startYRef.current;
+    if (dy > 0) setPullY(Math.min(dy * 0.45, 90));
+  }
+  async function onTouchEnd() {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    if (pullY > THRESHOLD) {
+      setRefreshing(true);
+      setPullY(64);
+      await onRefresh();
+      setTimeout(()=>{ setRefreshing(false); setPullY(0); }, 400);
+    } else {
+      setPullY(0);
+    }
+  }
+
+  return (
+    <div
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",overflow:"hidden"}}
+    >
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:refreshing?64:pullY,transition:draggingRef.current?"none":"height 0.25s ease",flexShrink:0,overflow:"hidden"}}>
+        <img src={CTO_LOGO} alt="" style={{width:32,height:32,borderRadius:8,animation:refreshing?"ptr-spin 0.8s linear infinite":"none",transform:refreshing?"none":`rotate(${Math.min(pullY/THRESHOLD,1)*360}deg)`,opacity:Math.min((refreshing?64:pullY)/40,1)}}/>
+      </div>
+      <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [currentUser,setCurrentUser]   = useState(()=>loadSession());
@@ -1108,6 +1247,7 @@ export default function App() {
   const [reviewingDog,setReviewingDog] = useState(null); // pending dog being reviewed by admin
   const [showAccount,setShowAccount]   = useState(false);
   const [navOpen,setNavOpen]           = useState(false);
+  const navRef                         = useRef(null);
   const [confirm,setConfirm]           = useState(null);
 
   // session form
@@ -1130,19 +1270,40 @@ export default function App() {
 
   const fileInputRef = useRef(null);
 
+  const [isNarrow,setIsNarrow] = useState(()=>window.innerWidth <= 480);
+  useEffect(()=>{
+    const mq = window.matchMedia("(max-width: 480px)");
+    const handler = e=>setIsNarrow(e.matches);
+    mq.addEventListener("change", handler);
+    return ()=>mq.removeEventListener("change", handler);
+  },[]);
+
   useEffect(()=>{if(currentUser){const d=loadDogs();setDogs(d);setActiveId(d[0]?.id??null);const p=loadPending();setPending(p);const a=loadAlumni();setAlumni(a);}},[currentUser?.userId]);
   useEffect(()=>{if(currentUser&&dogs.length>=0)saveDogs(dogs);},[dogs]);
   useEffect(()=>{savePending(pending);},[pending]);
   useEffect(()=>{saveAlumni(alumni);},[alumni]);
   useEffect(()=>{
     if(!navOpen) return;
-    function close(e){ setNavOpen(false); }
-    document.addEventListener("click", close);
-    return ()=>document.removeEventListener("click", close);
+    function handleOutside(e){
+      if(navRef.current && !navRef.current.contains(e.target)) setNavOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    document.addEventListener("touchstart", handleOutside);
+    return ()=>{
+      document.removeEventListener("mousedown", handleOutside);
+      document.removeEventListener("touchstart", handleOutside);
+    };
   },[navOpen]);
 
   function handleLogin(user){setCurrentUser(user);}
   function handleLogout(){saveSession(null);setCurrentUser(null);setDogs([]);setActiveId(null);setShowAccount(false);}
+  async function handlePullRefresh(){
+    if(!currentUser) return;
+    setDogs(loadDogs());
+    setPending(loadPending());
+    setAlumni(loadAlumni());
+    await new Promise(r=>setTimeout(r,500));
+  }
   function handleUpdateName(newName,newAvatar,newPhone){
     const users=loadUsers(); const key=currentUser.username;
     if(users[key]){users[key].displayName=newName;users[key].avatar=newAvatar;users[key].phone=newPhone;saveUsers(users);}
@@ -1255,11 +1416,17 @@ export default function App() {
   function saveSession_(){
     if(!sessionNote.trim()||!dog)return;
     if(editingSessionId){
-      updateDog(dog.id,d=>({...d,sessions:d.sessions.map(s=>s.id===editingSessionId?{...s,date:sessionDate,note:sessionNote.trim(),motivation:sessionMotivation}:s)}));
+      updateDog(dog.id,d=>{
+        const flagged = detectFlaggedBehaviors(sessionNote.trim(), d.behaviors);
+        return {...d, sessions:d.sessions.map(s=>s.id===editingSessionId?{...s,date:sessionDate,note:sessionNote.trim(),motivation:sessionMotivation}:s), behaviors:[...d.behaviors,...flagged]};
+      });
       setEditingSessionId(null);
     } else {
       const entry={id:uid(),date:sessionDate,note:sessionNote.trim(),motivation:sessionMotivation,trainer:currentUser.displayName,loggedAt:new Date().toISOString()};
-      updateDog(dog.id,d=>({...d,sessions:[entry,...d.sessions]}));
+      updateDog(dog.id,d=>{
+        const flagged = detectFlaggedBehaviors(entry.note, d.behaviors);
+        return {...d, sessions:[entry,...d.sessions], behaviors:[...d.behaviors,...flagged]};
+      });
       setShowConfetti(true);setTimeout(()=>setShowConfetti(false),2800);
     }
     setSessionNote("");setSessionDate(today());setSessionMotivation("");
@@ -1300,28 +1467,29 @@ export default function App() {
   const phaseProgress = dog ? getPhaseProgress(dog.checklist) : {};
 
   return (
-    <div style={{fontFamily:"system-ui,-apple-system,sans-serif",minHeight:"100vh",background:"#FAF8F5",display:"flex",flexDirection:"column"}}>
+    <div style={{fontFamily:"system-ui,-apple-system,sans-serif",height:"100vh",overflow:"hidden",background:"#FAF8F5",display:"flex",flexDirection:"column"}}>
       <style>{`
         @keyframes slideIn    { from { opacity:0; transform:translateX(18px); } to { opacity:1; transform:translateX(0); } }
         @keyframes fadeTab    { from { opacity:0; transform:translateY(6px);  } to { opacity:1; transform:translateY(0); } }
         @keyframes dashFade   { from { opacity:0; transform:translateY(12px);} to { opacity:1; transform:translateY(0); } }
+        @keyframes ptr-spin   { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
       `}</style>
 
       {/* Header */}
-      <header style={{background:RED,padding:"0 20px",height:54,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,boxShadow:"0 2px 12px rgba(139,0,0,0.25)"}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <img src={CTO_LOGO} alt="CTO Dog Training" style={{width:38,height:38,objectFit:"contain",borderRadius:6,flexShrink:0}}/>
-          <div>
-            <div style={{fontSize:14,fontWeight:700,color:"#fff",letterSpacing:"-0.2px"}}>CTO Dog Training</div>
-            <div style={{fontSize:10,color:"rgba(255,255,255,0.5)",letterSpacing:"0.7px",textTransform:"uppercase"}}>Trainer Dashboard</div>
+      <header style={{background:RED,padding:isNarrow?"env(safe-area-inset-top,0px) 10px 0":"env(safe-area-inset-top,0px) 20px 0",minHeight:54,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,boxShadow:"0 2px 12px rgba(139,0,0,0.25)",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:isNarrow?6:10,minWidth:0}}>
+          <img src={CTO_LOGO} alt="CTO Dog Training" style={{width:isNarrow?28:38,height:isNarrow?28:38,objectFit:"contain",borderRadius:6,flexShrink:0}}/>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:isNarrow?12:14,fontWeight:700,color:"#fff",letterSpacing:"-0.2px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>CTO Dog Training</div>
+            {!isNarrow&&<div style={{fontSize:10,color:"rgba(255,255,255,0.5)",letterSpacing:"0.7px",textTransform:"uppercase"}}>Trainer Dashboard</div>}
           </div>
         </div>
 
         {/* Center nav — dropdown */}
-        <div style={{position:"relative"}}>
+        <div ref={navRef} style={{position:"relative",minWidth:0}}>
           <button
             onClick={()=>setNavOpen(o=>!o)}
-            style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.18)",borderRadius:8,padding:"7px 14px",cursor:"pointer",color:"#fff",fontSize:13,fontWeight:500,fontFamily:"inherit",transition:"background 0.15s"}}
+            style={{display:"flex",alignItems:"center",gap:isNarrow?4:8,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.18)",borderRadius:8,padding:isNarrow?"6px 8px":"7px 14px",cursor:"pointer",color:"#fff",fontSize:isNarrow?11:13,fontWeight:500,fontFamily:"inherit",transition:"background 0.15s",maxWidth:isNarrow?110:"none",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}
           >
             {view==="dashboard"&&<><span style={{fontSize:13}}>⊞</span> Dashboard</>}
             {view==="lessons"&&<>Lessons</>}
@@ -1330,7 +1498,8 @@ export default function App() {
             {view==="trainers"&&<>Trainers</>}
             {view==="alumni"&&<>Alumni</>}
             {view==="detail"&&dog&&<><div style={{width:14,height:14,borderRadius:"50%",background:dog.color,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:700,color:"#fff",flexShrink:0}}>{getInitials(dog.name)}</div>{dog.name}</>}
-            <span style={{fontSize:10,marginLeft:2,opacity:0.7,transition:"transform 0.2s",display:"inline-block",transform:navOpen?"rotate(180deg)":"rotate(0)"}}>▼</span>
+            {view==="detail"&&!dog&&<>My Dogs</>}
+            <span style={{fontSize:10,marginLeft:2,opacity:0.7,transition:"transform 0.2s",display:"inline-block",transform:navOpen?"rotate(180deg)":"rotate(0)",flexShrink:0}}>▼</span>
           </button>
 
           {navOpen&&(
@@ -1363,25 +1532,26 @@ export default function App() {
           )}
         </div>
 
-        <button onClick={()=>setShowAccount(true)} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(0,0,0,0.2)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:99,padding:"5px 12px 5px 6px",cursor:"pointer"}}>
+        <button onClick={()=>setShowAccount(true)} style={{display:"flex",alignItems:"center",gap:isNarrow?4:8,background:"rgba(0,0,0,0.2)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:99,padding:isNarrow?"4px 8px 4px 4px":"5px 12px 5px 6px",cursor:"pointer",flexShrink:0}}>
           <div style={{width:26,height:26,borderRadius:"50%",background:"rgba(255,255,255,0.2)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:11,overflow:"hidden",flexShrink:0}}>
             {currentUser.avatar?<img src={currentUser.avatar} alt="Profile" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:getInitials(currentUser.displayName)}
           </div>
-          <span style={{fontSize:12,color:"rgba(255,255,255,0.9)",fontWeight:500}}>{currentUser.displayName}</span>
-          {currentUser.admin&&<span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:99,background:"#D97706",color:"#fff"}}>Admin</span>}
+          {!isNarrow&&<span style={{fontSize:12,color:"rgba(255,255,255,0.9)",fontWeight:500,whiteSpace:"nowrap"}}>{currentUser.displayName}</span>}
+          {!isNarrow&&currentUser.admin&&<span style={{fontSize:10,fontWeight:600,padding:"2px 6px",borderRadius:99,background:"#D97706",color:"#fff",whiteSpace:"nowrap"}}>Admin</span>}
           <span style={{fontSize:10,color:"rgba(255,255,255,0.4)"}}>▾</span>
         </button>
       </header>
 
+      <PullToRefresh onRefresh={handlePullRefresh}>
       {/* ── DASHBOARD VIEW ── */}
       {view==="dashboard"&&(
-        <div style={{flex:1,overflowY:"auto",padding:"28px 32px",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:28}}>
+        <div className="view-pad" style={{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:28,flexWrap:"wrap",gap:12}}>
             <div>
-              <h1 style={{fontSize:22,fontWeight:700,color:"#1a1a1a",margin:0}}>Welcome back, {currentUser.displayName.split(" ")[0]} 👋</h1>
+              <h1 style={{fontSize:isNarrow?18:22,fontWeight:700,color:"#1a1a1a",margin:0}}>Welcome back, {currentUser.displayName.split(" ")[0]} 👋</h1>
               <p style={{fontSize:13,color:"#888",marginTop:4}}>{dogs.length} dog{dogs.length!==1?"s":""} in program</p>
             </div>
-            <button onClick={()=>setShowAddDog(true)} style={{...btnPrim,display:"flex",alignItems:"center",gap:6,fontSize:13}}>+ Add dog</button>
+            <button onClick={()=>setShowAddDog(true)} style={{...btnPrim,display:"flex",alignItems:"center",gap:6,fontSize:13,whiteSpace:"nowrap"}}>+ Add dog</button>
           </div>
 
           {/* Admin pending approval panel */}
@@ -1530,10 +1700,10 @@ export default function App() {
         const myPendingLessons = pending.filter(d=>d.program==="lessons"&&d.submittedBy===currentUser.displayName);
 
         return (
-          <div style={{display:"flex",flex:1,overflow:"hidden",height:"calc(100vh - 54px)",animation:"dashFade 0.2s ease"}}>
+          <div style={{display:"flex",flex:1,minHeight:0,overflow:"hidden",animation:"dashFade 0.2s ease"}}>
 
             {/* Lessons sidebar */}
-            <aside style={{width:220,background:`#fff url("${PAW_SVG}") repeat`,backgroundSize:"80px",borderRight:"1px solid #ede8e0",display:"flex",flexDirection:"column",flexShrink:0,overflowY:"auto"}}>
+            <aside style={{display: isNarrow&&lessonDog ? "none" : "flex", width: isNarrow ? "100%" : 220,background:`#fff url("${PAW_SVG}") repeat`,backgroundSize:"80px",borderRight:"1px solid #ede8e0",flexDirection:"column",flexShrink:0,minHeight:0,overflowY:"auto",overflowX:"hidden"}}>
               <div style={{padding:"12px 10px 8px",background:"rgba(255,255,255,0.9)"}}>
                 <div style={{fontSize:11,fontWeight:700,color:"#7E22CE",textTransform:"uppercase",letterSpacing:"0.6px",marginBottom:8}}>📚 Lessons</div>
                 <button onClick={()=>setShowAddLessonDog(true)} style={{...btnPrim,width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:6,fontSize:13}}>+ Add dog</button>
@@ -1587,7 +1757,7 @@ export default function App() {
             </aside>
 
             {/* Lessons main content — reuses full detail logic */}
-            <main style={{flex:1,overflowY:"auto",padding:"22px 26px",background:"#FAF8F5"}}>
+            {(!isNarrow||lessonDog)&&<main style={{flex:1,minWidth:0,minHeight:0,overflowY:"auto",overflowX:"hidden",padding:"22px 26px",background:"#FAF8F5"}}>
               {!lessonDog?(
                 <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"60%",color:"#ccc",gap:12}}>
                   <span style={{fontSize:48}}>📚</span>
@@ -1598,15 +1768,18 @@ export default function App() {
                 <div style={{animation:"slideIn 0.22s ease"}}>
                   {/* Dog header */}
                   <div style={{display:"flex",alignItems:"flex-start",gap:14,marginBottom:22,paddingBottom:18,borderBottom:"1px solid #e8e0d8"}}>
+                    {isNarrow&&<button onClick={()=>setActiveLessonId(null)} style={{background:"none",border:"1px solid #d4d4d4",borderRadius:7,padding:"3px 10px",fontSize:16,color:"#888",cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>←</button>}
                     <div style={{width:52,height:52,borderRadius:"50%",background:lessonDog.color,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:18,flexShrink:0,boxShadow:`0 2px 10px ${lessonDog.color}55`}}>{getInitials(lessonDog.name)}</div>
                     <div style={{flex:1}}>
                       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:2}}>
                         <h2 style={{fontSize:20,fontWeight:700,color:"#1a1a1a",margin:0}}>{lessonDog.name}</h2>
                         <span style={{fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:99,background:"#FDF4FF",color:"#7E22CE",border:"1px solid #E9D5FF"}}>📚 Lessons</span>
+                        <button onClick={()=>deleteDog(lessonDog.id)} style={{background:"#F0FDF4",border:"1px solid #BBF7D0",borderRadius:7,padding:"3px 10px",fontSize:12,fontWeight:600,color:"#166534",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}}>🎓 Graduate</button>
                         <button onClick={()=>openEditDog(lessonDog)} style={{background:"none",border:"1px solid #d4d4d4",borderRadius:7,padding:"3px 10px",fontSize:16,color:"#888",cursor:"pointer",fontFamily:"inherit",letterSpacing:"-1px"}}>⋮</button>
                       </div>
                       <div style={{fontSize:13,color:"#888",marginTop:2}}>{lessonDog.breed}{lessonDog.age?` · ${lessonDog.age}`:""}</div>
                       <div style={{fontSize:12,color:"#aaa",marginTop:1}}>Goal: {lessonDog.goal}</div>
+                      {(lessonDog.ownerName||lessonDog.ownerPhone)&&<div style={{fontSize:12,color:"#aaa",marginTop:1}}>Owner: {lessonDog.ownerName||"—"}{lessonDog.ownerPhone?` · ${lessonDog.ownerPhone}`:""}</div>}
                       {lessonDog.concerns&&<div style={{marginTop:8,background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:8,padding:"7px 10px"}}><span style={{fontSize:11,fontWeight:600,color:"#92400E",textTransform:"uppercase",letterSpacing:"0.4px"}}>Owner concerns · </span><span style={{fontSize:12,color:"#78350F",lineHeight:1.5}}>{lessonDog.concerns}</span></div>}
                     </div>
                   </div>
@@ -1622,14 +1795,14 @@ export default function App() {
                   />
                 </div>
               )}
-            </main>
+            </main>}
           </div>
         );
       })()}
 
       {/* ── RECENT LOGS VIEW ── */}
       {view==="logs"&&(
-        <div style={{flex:1,overflowY:"auto",padding:"28px 32px",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
+        <div className="view-pad" style={{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
           <div style={{marginBottom:24}}>
             <h1 style={{fontSize:22,fontWeight:700,color:"#1a1a1a",margin:0}}>Session Logs</h1>
             <p style={{fontSize:13,color:"#888",marginTop:4}}>All sessions across every dog, newest first</p>
@@ -1709,7 +1882,7 @@ export default function App() {
         const other  = allFiles.filter(f => !f.type?.startsWith("image/") && !f.type?.startsWith("video/"));
 
         return (
-          <div style={{flex:1,overflowY:"auto",padding:"28px 32px",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
+          <div className="view-pad" style={{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",background:"#FAF8F5",animation:"dashFade 0.25s ease"}}>
             <div style={{marginBottom:24}}>
               <h1 style={{fontSize:22,fontWeight:700,color:"#1a1a1a",margin:0}}>Content</h1>
               <p style={{fontSize:13,color:"#888",marginTop:4}}>
@@ -1734,7 +1907,10 @@ export default function App() {
                     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12}}>
                       {photos.map(f=>(
                         <div key={f.id} style={{borderRadius:10,overflow:"hidden",border:"1px solid #e8e0d8",background:"#fff",boxShadow:"0 1px 4px rgba(0,0,0,0.04)"}}>
-                          <img src={f.dataUrl} alt={f.name} style={{width:"100%",height:130,objectFit:"cover",display:"block"}}/>
+                          <div style={{position:"relative"}}>
+                            <img src={f.dataUrl} alt={f.name} style={{width:"100%",height:130,objectFit:"cover",display:"block"}}/>
+                            <button onClick={()=>downloadFile(f)} title="Download" style={{position:"absolute",top:6,right:6,width:28,height:28,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.55)",color:"#fff",fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>⬇</button>
+                          </div>
                           <div style={{padding:"8px 10px"}}>
                             <div onClick={()=>selectDog(f.dogId)} style={{display:"inline-flex",alignItems:"center",gap:5,background:f.dogColor+"18",border:`1px solid ${f.dogColor}44`,borderRadius:99,padding:"2px 8px 2px 5px",cursor:"pointer",marginBottom:4}}>
                               <div style={{width:14,height:14,borderRadius:"50%",background:f.dogColor,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:7}}>{getInitials(f.dogName)}</div>
@@ -1758,6 +1934,7 @@ export default function App() {
                           <div style={{position:"relative"}}>
                             <video src={f.dataUrl} controls style={{width:"100%",height:140,objectFit:"cover",display:"block",background:"#000"}}/>
                             <div style={{position:"absolute",top:8,left:8,background:"rgba(0,0,0,0.6)",borderRadius:4,padding:"2px 7px",fontSize:10,color:"#fff",fontWeight:600}}>VIDEO</div>
+                            <button onClick={()=>downloadFile(f)} title="Download" style={{position:"absolute",top:6,right:6,width:28,height:28,borderRadius:"50%",border:"none",background:"rgba(0,0,0,0.55)",color:"#fff",fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>⬇</button>
                           </div>
                           <div style={{padding:"8px 10px"}}>
                             <div onClick={()=>selectDog(f.dogId)} style={{display:"inline-flex",alignItems:"center",gap:5,background:f.dogColor+"18",border:`1px solid ${f.dogColor}44`,borderRadius:99,padding:"2px 8px 2px 5px",cursor:"pointer",marginBottom:4}}>
@@ -1788,6 +1965,7 @@ export default function App() {
                             <div style={{width:14,height:14,borderRadius:"50%",background:f.dogColor,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:7}}>{getInitials(f.dogName)}</div>
                             <span style={{fontSize:11,fontWeight:600,color:f.dogColor}}>{f.dogName}</span>
                           </div>
+                          <button onClick={()=>downloadFile(f)} title="Download" style={{background:"none",border:"1px solid #d4d4d4",borderRadius:7,padding:"5px 9px",fontSize:14,color:"#888",cursor:"pointer",flexShrink:0}}>⬇</button>
                         </div>
                       ))}
                     </div>
@@ -1821,7 +1999,7 @@ export default function App() {
           <div style={{flex:1,display:"flex",overflow:"hidden",animation:"dashFade 0.25s ease"}}>
 
             {/* Left: trainer grid */}
-            <div style={{width: selectedTrainer ? 320 : "100%", flexShrink:0, overflowY:"auto", padding:"28px 24px", background:"#FAF8F5", borderRight: selectedTrainer?"1px solid #e8e0d8":"none", transition:"width 0.2s"}}>
+            <div style={{display: isNarrow&&selectedTrainer ? "none" : "block", width: selectedTrainer ? (isNarrow?"100%":320) : "100%", flexShrink:0, minHeight:0, overflowY:"auto",overflowX:"hidden", padding:"28px 24px", background:"#FAF8F5", borderRight: selectedTrainer?"1px solid #e8e0d8":"none", transition:"width 0.2s"}}>
               <div style={{marginBottom:20}}>
                 <h1 style={{fontSize:22,fontWeight:700,color:"#1a1a1a",margin:0}}>Trainers</h1>
                 <p style={{fontSize:13,color:"#888",marginTop:4}}>{allUsers.length} trainer account{allUsers.length!==1?"s":""} registered</p>
@@ -1892,7 +2070,7 @@ export default function App() {
 
             {/* Right: logs panel */}
             {selectedUser&&(
-              <div style={{flex:1,overflowY:"auto",padding:"28px 28px",background:"#fff"}}>
+              <div style={{flex:1,minWidth:0,minHeight:0,overflowY:"auto",overflowX:"hidden",padding:"28px 28px",background:"#fff"}}>
                 {/* Panel header */}
                 <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:22,paddingBottom:16,borderBottom:"1px solid #e8e0d8"}}>
                   <div style={{width:48,height:48,borderRadius:"50%",background:selectedUser.avatar?"transparent":"#4338CA",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:17,flexShrink:0,overflow:"hidden"}}>
@@ -1946,10 +2124,10 @@ export default function App() {
 
       {/* ── DETAIL VIEW ── */}
       {view==="detail"&&(
-      <div style={{display:"flex",flex:1,overflow:"hidden",height:"calc(100vh - 54px)"}}>
+      <div style={{display:"flex",flex:1,minHeight:0,overflow:"hidden"}}>
 
         {/* Sidebar with paw watermark */}
-        <aside style={{width:220,background:`#fff url("${PAW_SVG}") repeat`,backgroundSize:"80px",borderRight:"1px solid #ede8e0",display:"flex",flexDirection:"column",flexShrink:0,overflowY:"auto"}}>
+        <aside style={{display: isNarrow&&dog ? "none" : "flex", width: isNarrow ? "100%" : 220,background:`#fff url("${PAW_SVG}") repeat`,backgroundSize:"80px",borderRight:"1px solid #ede8e0",flexDirection:"column",flexShrink:0,minHeight:0,overflowY:"auto",overflowX:"hidden"}}>
           <div style={{padding:"12px 10px 6px",background:"rgba(255,255,255,0.85)"}}>
             <button onClick={()=>setShowAddDog(true)} style={{...btnPrim,width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:6,fontSize:13}}>+ Add dog</button>
           </div>
@@ -1963,7 +2141,7 @@ export default function App() {
         </aside>
 
         {/* Main */}
-        <main style={{flex:1,overflowY:"auto",padding:"22px 26px",background:"#FAF8F5"}}>
+        {(!isNarrow||dog)&&<main style={{flex:1,minWidth:0,minHeight:0,overflowY:"auto",overflowX:"hidden",padding:"22px 26px",background:"#FAF8F5"}}>
           {!dog?(
             <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"60%",color:"#ccc",gap:12}}>
               <img src={CTO_LOGO} alt="CTO Dog Training" style={{width:72,height:72,objectFit:"contain",borderRadius:10,opacity:0.35}}/>
@@ -1973,7 +2151,8 @@ export default function App() {
             <div key={panelKey} style={{animation:"slideIn 0.25s ease"}}>
 
               {/* Dog header */}
-              <div style={{display:"flex",alignItems:"flex-start",gap:14,marginBottom:22,paddingBottom:18,borderBottom:"1px solid #e8e0d8"}}>
+              <div style={{display:"flex",flexWrap:isNarrow?"wrap":"nowrap",alignItems:"flex-start",gap:14,marginBottom:22,paddingBottom:18,borderBottom:"1px solid #e8e0d8"}}>
+                {isNarrow&&<button onClick={()=>setActiveId(null)} style={{background:"none",border:"1px solid #d4d4d4",borderRadius:7,padding:"3px 10px",fontSize:16,color:"#888",cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>←</button>}
                 <div style={{width:52,height:52,borderRadius:"50%",background:dog.color,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:18,flexShrink:0,boxShadow:`0 2px 10px ${dog.color}55`}}>{getInitials(dog.name)}</div>
                 <div style={{flex:1}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:2}}>
@@ -1984,15 +2163,17 @@ export default function App() {
                       ? <span style={{fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:99,background:"#FDF4FF",color:"#7E22CE",border:"1px solid #E9D5FF"}}>📚 Lessons</span>
                       : <span style={{fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:99,background:"#EFF6FF",color:"#1D4ED8",border:"1px solid #BFDBFE"}}>🎓 Train</span>
                     }
+                    <button onClick={()=>deleteDog(dog.id)} style={{background:"#F0FDF4",border:"1px solid #BBF7D0",borderRadius:7,padding:"3px 10px",fontSize:12,fontWeight:600,color:"#166534",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}}>🎓 Graduate</button>
                     <button onClick={()=>openEditDog(dog)} style={{background:"none",border:"1px solid #d4d4d4",borderRadius:7,padding:"3px 10px",fontSize:16,color:"#888",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",letterSpacing:"-1px"}}>⋮</button>
                   </div>
                   <div style={{fontSize:13,color:"#888",marginTop:2}}>{dog.breed}{dog.age?` · ${dog.age}`:""} · Entered: {dog.entryDate?formatDate(dog.entryDate):dog.owner||"—"}{isBoard&&dog.returnDate?` · Returns: ${formatDate(dog.returnDate)}`:""}</div>
                   <div style={{fontSize:12,color:"#aaa",marginTop:1}}>Goal: {dog.goal}</div>
+                  {(dog.ownerName||dog.ownerPhone)&&<div style={{fontSize:12,color:"#aaa",marginTop:1}}>Owner: {dog.ownerName||"—"}{dog.ownerPhone?` · ${dog.ownerPhone}`:""}</div>}
                   {dog.concerns&&<div style={{marginTop:8,background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:8,padding:"7px 10px"}}><span style={{fontSize:11,fontWeight:600,color:"#92400E",textTransform:"uppercase",letterSpacing:"0.4px"}}>Owner concerns · </span><span style={{fontSize:12,color:"#78350F",lineHeight:1.5}}>{dog.concerns}</span></div>}
                 </div>
 
                 {/* Phase summary */}
-                <div style={{flexShrink:0,background:"#fff",border:"1px solid #e8e0d8",borderRadius:10,padding:"10px 14px",minWidth:130}}>
+                <div style={{flexShrink:0,width:isNarrow?"100%":undefined,background:"#fff",border:"1px solid #e8e0d8",borderRadius:10,padding:"10px 14px",minWidth:130,boxSizing:"border-box"}}>
                   <div style={{fontSize:10,fontWeight:600,color:"#aaa",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:6}}>Training Phase</div>
                   {PHASES.map(p=>{
                     const {total,done}=phaseProgress[p.key]||{total:0,done:0};
@@ -2010,9 +2191,9 @@ export default function App() {
               </div>
 
               {/* Tabs */}
-              <div style={{display:"flex",gap:2,marginBottom:18,borderBottom:"1px solid #e8e0d8"}}>
+              <div style={{display:"flex",gap:2,marginBottom:18,borderBottom:"1px solid #e8e0d8",overflowX:"auto",overflowY:"hidden",touchAction:"pan-x",WebkitOverflowScrolling:"touch"}}>
                 {tabs.map(t=>(
-                  <button key={t} onClick={()=>switchTab(t)} style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:activeTab===t?600:400,color:activeTab===t?RED:"#888",padding:"7px 14px 10px",borderBottom:activeTab===t?`2px solid ${RED}`:"2px solid transparent",marginBottom:-1,transition:"all 0.12s"}}>
+                  <button key={t} onClick={()=>switchTab(t)} style={{background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:activeTab===t?600:400,color:activeTab===t?RED:"#888",padding:"7px 14px 10px",borderBottom:activeTab===t?`2px solid ${RED}`:"2px solid transparent",marginBottom:-1,transition:"all 0.12s",whiteSpace:"nowrap",flexShrink:0}}>
                     {tabLabels[t]}{t==="files"&&dog.files.length>0?<span style={{marginLeft:5,background:"#e5e5e5",borderRadius:99,fontSize:10,padding:"1px 6px",color:"#555"}}>{dog.files.length}</span>:null}
                     {t==="behaviors"&&dog.behaviors.filter(b=>!b.resolved).length>0?<span style={{marginLeft:5,background:"#FEF2F2",borderRadius:99,fontSize:10,padding:"1px 6px",color:"#991B1B"}}>{dog.behaviors.filter(b=>!b.resolved).length}</span>:null}
                   </button>
@@ -2206,14 +2387,15 @@ export default function App() {
                 )}
 
                 {/* Summary */}
-                {activeTab==="summary"&&<SummaryTab dog={dog}/>}
+                {activeTab==="summary"&&<SummaryTab dog={dog} updateDog={updateDog}/>}
 
               </div>{/* end tab content */}
             </div>
           )}
-        </main>
+        </main>}
       </div>
       )}{/* end detail view */}
+      </PullToRefresh>
 
       {showAddDog&&<AddDogModal onSave={addDog} onClose={()=>setShowAddDog(false)}/>}
       {showAddLessonDog&&<AddLessonDogModal onSave={addLessonDogDirect} onClose={()=>setShowAddLessonDog(false)}/>}
